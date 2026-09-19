@@ -1,0 +1,47 @@
+{
+  "backend": "classifier_dev",
+  "remote": true,
+  "tier": "fast",
+  "endpoint": "https://classifier.dev/v1/classify",
+  "min_items": 8,
+  "batch_size": 250,
+  "relevance_threshold": 0.8,
+  "uncertain_threshold": 0.7,
+  "max_input_chars": 8000,
+  "request_timeout_ms": 5000,
+  "max_retries": 1,
+  "max_retry_after_ms": 3000,
+  "circuit_breaker": {
+    "failure_window_ms": 300000,
+    "open_after": 3,
+    "cooldown_ms": 600000
+  },
+  "cache": {
+    "enabled": true,
+    "ttl_seconds": 3600,
+    "store_raw_inputs": false
+  },
+  "budget": {
+    "classifications_per_minute": 2000,
+    "classifications_per_day": 12000
+  },
+  "privacy": {
+    "payload_policy": "metadata_and_snippets",
+    "block_probable_secrets": true,
+    "sensitive_paths": [
+      ".env",
+      ".env.*",
+      "**/.ssh/**",
+      "**/*id_rsa*",
+      "**/*id_ed25519*",
+      "**/*.pem",
+      "**/*.key",
+      "**/credentials*",
+      "**/secrets*",
+      "**/.aws/**",
+      "**/.config/gcloud/**"
+    ],
+    "extra_secret_patterns": []
+  },
+  "mode": "active"
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "codex-semantic-router",
+  "version": "0.1.0",
+  "description": "Filter large textual candidate sets before Codex reads them, using classifier.dev with recall-first fail-open routing and local secret protection.",
+  "author": {
+    "name": "benclawbot",
+    "url": "https://github.com/benclawbot"
+  },
+  "homepage": "https://github.com/benclawbot/Codex-semantic-router",
+  "repository": "https://github.com/benclawbot/Codex-semantic-router",
+  "license": "MIT",
+  "keywords": ["codex", "semantic-routing", "context", "classifier", "developer-tools"]
+}

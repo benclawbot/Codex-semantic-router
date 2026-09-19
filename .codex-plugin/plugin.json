@@ -1,0 +1,6 @@
+{
+  "name": "codex-semantic-router",
+  "version": "0.1.0",
+  "description": "Recall-first semantic filtering for large Codex search, log, issue, diff, and documentation candidate sets.",
+  "skills": "./skills/"
+}

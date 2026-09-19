@@ -1,0 +1,16 @@
+{
+  "name": "codex-semantic-router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Zero-dependency semantic pre-filter for Codex workflows.",
+  "engines": { "node": ">=20" },
+  "bin": {
+    "codex-semantic-router": "./skills/bulk-semantic-filter/scripts/router.mjs"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:network": "ALLOW_CLASSIFIER_NETWORK_TESTS=1 node --test tests/network.test.mjs"
+  },
+  "license": "MIT"
+}
