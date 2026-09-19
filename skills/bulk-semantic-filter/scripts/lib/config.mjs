@@ -4,8 +4,12 @@ import { dirname, join, parse, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
-export const DEFAULTS_PATH = join(ROOT_DIR, 'config', 'defaults.json');
+const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const REPO_ROOT = resolve(SKILL_DIR, '..', '..');
+export const DEFAULTS_PATH = [
+  join(SKILL_DIR, 'config', 'defaults.json'),
+  join(REPO_ROOT, 'config', 'defaults.json'),
+].find((p) => existsSync(p)) ?? join(SKILL_DIR, 'config', 'defaults.json');
 
 function isObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
@@ -32,15 +36,18 @@ async function readJsonIfExists(path) {
   return parsed;
 }
 
-export function findRepoConfig(start = process.cwd()) {
+export function findRepoConfig(start = process.cwd(), maxDepth = 16) {
   let dir = resolve(start);
   const root = parse(dir).root;
-  while (true) {
-    const candidate = join(dir, '.codex', 'semantic-router.json');
-    if (existsSync(candidate)) return candidate;
+  for (let i = 0; i <= maxDepth; i++) {
+    const opencodeCandidate = join(dir, '.opencode', 'semantic-router.json');
+    if (existsSync(opencodeCandidate)) return opencodeCandidate;
+    const codexCandidate = join(dir, '.codex', 'semantic-router.json');
+    if (existsSync(codexCandidate)) return codexCandidate;
     if (dir === root) return null;
     dir = dirname(dir);
   }
+  return null;
 }
 
 function envBool(value) {
@@ -64,6 +71,7 @@ export function configFromEnv(env = process.env) {
   assign('endpoint', env.CODEX_SEMANTIC_ROUTER_ENDPOINT);
   assign('min_items', envNumber(env.CODEX_SEMANTIC_ROUTER_MIN_ITEMS));
   assign('batch_size', envNumber(env.CODEX_SEMANTIC_ROUTER_BATCH_SIZE));
+  assign('max_concurrency', envNumber(env.CODEX_SEMANTIC_ROUTER_MAX_CONCURRENCY));
   assign('relevance_threshold', envNumber(env.CODEX_SEMANTIC_ROUTER_THRESHOLD));
   assign('uncertain_threshold', envNumber(env.CODEX_SEMANTIC_ROUTER_UNCERTAIN_THRESHOLD));
   assign('max_input_chars', envNumber(env.CODEX_SEMANTIC_ROUTER_MAX_INPUT_CHARS));
@@ -82,7 +90,8 @@ export function configFromCli(options = {}) {
     ['minItems', 'min_items'],
     ['batchSize', 'batch_size'],
     ['endpoint', 'endpoint'],
-    ['mode', 'mode']
+    ['mode', 'mode'],
+    ['maxInputChars', 'max_input_chars']
   ];
   for (const [src, dest] of map) if (options[src] !== undefined) cfg[dest] = options[src];
   if (options.noCache) cfg.cache = { enabled: false };
@@ -99,6 +108,7 @@ export function validateConfig(config) {
   if (!/^https:\/\//.test(config.endpoint)) error('endpoint must be an https URL');
   if (!Number.isInteger(config.min_items) || config.min_items < 1) error('min_items must be a positive integer');
   if (!Number.isInteger(config.batch_size) || config.batch_size < 1 || config.batch_size > 1000) error('batch_size must be 1..1000');
+  if (!Number.isInteger(config.max_concurrency) || config.max_concurrency < 1 || config.max_concurrency > 16) error('max_concurrency must be 1..16');
   if (!(config.relevance_threshold >= 0 && config.relevance_threshold <= 1)) error('relevance_threshold must be 0..1');
   if (!(config.uncertain_threshold >= 0 && config.uncertain_threshold <= 1)) error('uncertain_threshold must be 0..1');
   if (!Number.isInteger(config.max_input_chars) || config.max_input_chars < 200 || config.max_input_chars > 32000) error('max_input_chars must be 200..32000');
@@ -134,4 +144,4 @@ export function sanitizedConfig(config) {
   return structuredClone(config);
 }
 
-export { ROOT_DIR };
+export { SKILL_DIR };

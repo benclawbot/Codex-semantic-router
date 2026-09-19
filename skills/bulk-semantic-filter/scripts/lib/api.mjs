@@ -35,6 +35,7 @@ export class ClassifierDevBackend {
     endpoint = 'https://classifier.dev/v1/classify',
     tier = 'fast',
     batchSize = 250,
+    maxConcurrency = 4,
     timeoutMs = 5000,
     maxRetries = 1,
     maxRetryAfterMs = 3000,
@@ -44,6 +45,7 @@ export class ClassifierDevBackend {
     this.endpoint = endpoint;
     this.tier = tier;
     this.batchSize = batchSize;
+    this.maxConcurrency = maxConcurrency;
     this.timeoutMs = timeoutMs;
     this.maxRetries = maxRetries;
     this.maxRetryAfterMs = maxRetryAfterMs;
@@ -100,21 +102,26 @@ export class ClassifierDevBackend {
   async #classifyBatches({ inputs, labels, instructions, multi = false, maxLabels }) {
     if (!Array.isArray(inputs) || inputs.length === 0) return { results: [], usage: { classifications: 0 } };
     if (inputs.length > 100000) throw new BackendError('refusing unusually large local classification set');
-    const results = [];
-    let classifications = 0;
+    const allowedLabels = new Set(labels);
+    const totalBatches = Math.ceil(inputs.length / this.batchSize);
+    const concurrency = Math.max(1, Math.min(this.maxConcurrency, totalBatches));
+    const batches = [];
     for (let start = 0; start < inputs.length; start += this.batchSize) {
-      const batch = inputs.slice(start, start + this.batchSize);
+      batches.push({ start, items: inputs.slice(start, start + this.batchSize) });
+    }
+    const buildPayload = (batch) => {
       const payload = { inputs: batch, labels, instructions, tier: this.tier };
       if (multi) {
         payload.multi = true;
         if (maxLabels != null) payload.max_labels = maxLabels;
         delete payload.tier; // classifier.dev multi-label does not use smart/fast tier selection.
       }
-      const body = await this.#request(payload);
-      if (!Array.isArray(body.results) || body.results.length !== batch.length) {
-        throw new BackendError(`backend result count mismatch: expected ${batch.length}, got ${Array.isArray(body.results) ? body.results.length : 'invalid'}`);
+      return payload;
+    };
+    const validate = (body, batchLen) => {
+      if (!Array.isArray(body.results) || body.results.length !== batchLen) {
+        throw new BackendError(`backend result count mismatch: expected ${batchLen}, got ${Array.isArray(body.results) ? body.results.length : 'invalid'}`);
       }
-      const allowedLabels = new Set(labels);
       for (const result of body.results) {
         if (!result || typeof result !== 'object') throw new BackendError('backend returned malformed result');
         if (multi) {
@@ -124,8 +131,20 @@ export class ClassifierDevBackend {
           if (result.confidence != null && (typeof result.confidence !== 'number' || result.confidence < 0 || result.confidence > 1)) throw new BackendError('backend returned invalid confidence');
         }
       }
-      results.push(...body.results);
-      classifications += batch.length;
+    };
+    const results = new Array(inputs.length);
+    let classifications = 0;
+    for (let i = 0; i < batches.length; i += concurrency) {
+      const window = batches.slice(i, i + concurrency);
+      const responses = await Promise.all(window.map(async ({ start, items }) => {
+        const body = await this.#request(buildPayload(items));
+        validate(body, items.length);
+        return { start, results: body.results };
+      }));
+      for (const { start, results: r } of responses) {
+        for (let j = 0; j < r.length; j++) results[start + j] = r[j];
+        classifications += r.length;
+      }
     }
     return { results, usage: { classifications } };
   }

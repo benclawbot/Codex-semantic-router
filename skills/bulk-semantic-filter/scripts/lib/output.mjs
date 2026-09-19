@@ -13,16 +13,35 @@ export function recordWithRoute(record, route) {
   return { id: record.id, text: record.text, route };
 }
 
-export function renderRecord(record, { output = 'plain', route = null, emitClassification = false } = {}) {
+function plainHeader(route) {
+  if (!route) return null;
+  if (route.label) return { label: route.label, confidence: route.confidence, status: route.status || 'classified' };
+  if (route.labels) return { label: route.labels.join(','), confidence: route.confidence, status: route.status || 'classified' };
+  if (route.status && route.status !== 'classified') return { label: route.status, confidence: null, status: route.status };
+  return null;
+}
+
+export function renderRecord(record, { output = 'plain', route = null, emitClassification = false, command = null, explain = false } = {}) {
   if (output === 'jsonl') return JSON.stringify(recordWithRoute(record, route ?? { status: 'unclassified' }));
-  if (emitClassification && route) {
-    const labels = route.labels?.join(',') ?? route.label ?? route.status ?? '-';
-    const confidence = route.confidence == null ? '-' : Number(route.confidence).toFixed(3);
-    return `${labels}\t${confidence}\t${record.original}`;
+  const header = emitClassification || (command && command !== 'filter' && command !== 'count') || explain;
+  if (header) {
+    const h = plainHeader(route) ?? { label: '-', confidence: null, status: 'unclassified' };
+    const confidence = h.confidence == null ? '-' : Number(h.confidence).toFixed(3);
+    if (explain && route) {
+      const bits = [`status=${h.status}`, `label=${h.label}`];
+      if (route.clipped) bits.push('clipped=1');
+      return `${bits.join(' ')}\t${record.original}`;
+    }
+    return `${h.label}\t${confidence}\t${record.original}`;
   }
   return record.original;
 }
 
 export function diagnostic(stderr, message) {
   stderr.write(`[semantic-router] ${message}\n`);
+}
+
+export function writeLine(stdout, line) {
+  if (line == null) return;
+  stdout.write(line + '\n');
 }

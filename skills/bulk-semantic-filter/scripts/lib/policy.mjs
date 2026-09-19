@@ -11,6 +11,7 @@ export function shouldKeep(result, threshold = 0.8) {
 
 export function applySafetyFloor(records, results, keptIndexes, topK = 3) {
   if (keptIndexes.length > 0 || records.length === 0) return keptIndexes;
+  const cap = Math.min(topK, records.length);
   const ranked = records.map((record, i) => ({
     i,
     score: Number(results[i]?.scores?.relevant)
@@ -18,11 +19,11 @@ export function applySafetyFloor(records, results, keptIndexes, topK = 3) {
   if (ranked.some((x) => Number.isFinite(x.score))) {
     return ranked
       .sort((a, b) => (Number.isFinite(b.score) ? b.score : -1) - (Number.isFinite(a.score) ? a.score : -1))
-      .slice(0, Math.min(topK, records.length))
+      .slice(0, cap)
       .map((x) => x.i)
       .sort((a, b) => a - b);
   }
-  return records.map((_, i) => i);
+  return records.slice(0, cap).map((_, i) => i);
 }
 
 function freshState() {
@@ -61,7 +62,7 @@ export class OperationalState {
   }
   normalize() {
     const now = this.now();
-    if (!this.state.minute_start || now - this.state.minute_start >= 60_000) {
+    if (this.state.minute_start === 0 || (this.state.minute_start > 0 && now - this.state.minute_start >= 60_000)) {
       this.state.minute_start = now;
       this.state.minute_count = 0;
     }
@@ -71,8 +72,9 @@ export class OperationalState {
       this.state.day_count = 0;
     }
     const windowMs = this.config.circuit_breaker.failure_window_ms;
-    if (this.state.last_failure_at && now - this.state.last_failure_at > windowMs && now >= this.state.open_until) {
+    if (this.state.last_failure_at === 0 || (this.state.last_failure_at > 0 && now - this.state.last_failure_at > windowMs)) {
       this.state.consecutive_failures = 0;
+      this.state.last_failure_at = 0;
     }
   }
   canClassify(count) {
@@ -85,8 +87,14 @@ export class OperationalState {
   }
   reserve(count) {
     this.normalize();
+    if (this.state.minute_start === 0) this.state.minute_start = this.now();
     this.state.minute_count += count;
     this.state.day_count += count;
+  }
+  release(count) {
+    this.normalize();
+    this.state.minute_count = Math.max(0, this.state.minute_count - count);
+    this.state.day_count = Math.max(0, this.state.day_count - count);
   }
   noteSuccess() {
     this.state.consecutive_failures = 0;
@@ -99,7 +107,10 @@ export class OperationalState {
     this.state.consecutive_failures += 1;
     this.state.last_failure_at = now;
     if (rateLimited) {
-      const openFor = dayLimit ? (retryAfterMs > 0 ? retryAfterMs : 60 * 60_000) : Math.max(retryAfterMs, this.config.circuit_breaker.cooldown_ms);
+      let openFor;
+      if (dayLimit) openFor = retryAfterMs > 0 ? retryAfterMs : 60 * 60_000;
+      else if (retryAfterMs > 0) openFor = retryAfterMs;
+      else openFor = this.config.circuit_breaker.cooldown_ms;
       this.state.open_until = Math.max(this.state.open_until, now + openFor);
       return;
     }

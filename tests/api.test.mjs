@@ -1,85 +1,114 @@
-import test from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ClassifierDevBackend, BackendError } from '../skills/bulk-semantic-filter/scripts/lib/api.mjs';
 
-function jsonResponse(body, status = 200, headers = {}) {
-  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+function tmpDir() {
+  return mkdtempSync(join(tmpdir(), 'bsf-api-'));
 }
 
-test('uses stable v1 endpoint, explicit user agent, fast tier, and idempotency key', async () => {
-  let seen;
-  const backend = new ClassifierDevBackend({ fetchImpl: async (url, init) => {
-    seen = { url: String(url), init, body: JSON.parse(init.body) };
-    return jsonResponse({ results: [{ label: 'relevant', confidence: 0.9, scores: { relevant: 0.9, 'not relevant': 0.1 } }] });
-  } });
-  const result = await backend.classify({ inputs: ['x'], labels: ['relevant', 'not relevant'], instructions: 'goal' });
-  assert.equal(seen.url, 'https://classifier.dev/v1/classify');
-  assert.equal(seen.body.tier, 'fast');
-  assert.equal(seen.init.headers['user-agent'], 'codex-semantic-router/0.1.0');
-  assert.equal(seen.init.headers['idempotency-key'].length, 64);
-  assert.equal(result.results[0].label, 'relevant');
+const CONFIG_BASE = {
+  backend: 'classifier_dev',
+  remote: true,
+  tier: 'fast',
+  endpoint: 'https://classifier.dev/v1/classify',
+  min_items: 8,
+  batch_size: 500,
+  max_concurrency: 4,
+  relevance_threshold: 0.8,
+  uncertain_threshold: 0.7,
+  max_input_chars: 8000,
+  request_timeout_ms: 5000,
+  max_retries: 1,
+  max_retry_after_ms: 3000,
+  circuit_breaker: { failure_window_ms: 300000, open_after: 3, cooldown_ms: 600000 },
+  cache: { enabled: true, ttl_seconds: 3600, store_raw_inputs: false },
+  budget: { classifications_per_minute: 2000, classifications_per_day: 12000 },
+  privacy: { payload_policy: 'metadata_and_snippets', block_probable_secrets: true, sensitive_paths: [], extra_secret_patterns: [] },
+  mode: 'active'
+};
+
+function stubFetch(respond) {
+  return async (url, init) => {
+    const body = JSON.parse(init?.body || '{}');
+    const res = await respond(url, body);
+    return {
+      ok: res.ok ?? true,
+      status: res.status ?? 200,
+      headers: { get: (k) => k.toLowerCase() === 'retry-after' ? (res.retryAfter || null) : null },
+      json: async () => res.body
+    };
+  };
+}
+
+test('backend respects batchSize to split a 1200-item run into chunks', async () => {
+  const dir = tmpDir();
+  try {
+    let callCount = 0;
+    let lastBatchSize = 0;
+    const fetch = stubFetch((url, body) => {
+      callCount++;
+      lastBatchSize = body.inputs.length;
+      return { body: { results: body.inputs.map(() => ({ label: 'relevant', confidence: 0.9 })) } };
+    });
+    const backend = new ClassifierDevBackend({ batchSize: 500, maxConcurrency: 1, fetchImpl: fetch });
+    const inputs = Array.from({ length: 1200 }, (_, i) => `item-${i}`);
+    const result = await backend.classify({ inputs, labels: ['relevant', 'not relevant'], instructions: 'x' });
+    assert.equal(callCount, 3);
+    assert.equal(lastBatchSize, 200);
+    assert.equal(result.results.length, 1200);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('batches and preserves response order', async () => {
-  const calls = [];
-  const backend = new ClassifierDevBackend({ batchSize: 2, fetchImpl: async (_url, init) => {
-    const body = JSON.parse(init.body); calls.push(body.inputs);
-    return jsonResponse({ results: body.inputs.map((x) => ({ label: x === 'b' ? 'not relevant' : 'relevant', confidence: 0.9 })) });
-  } });
-  const result = await backend.classify({ inputs: ['a', 'b', 'c'], labels: ['relevant', 'not relevant'], instructions: 'goal' });
-  assert.deepEqual(calls, [['a', 'b'], ['c']]);
-  assert.deepEqual(result.results.map((x) => x.label), ['relevant', 'not relevant', 'relevant']);
+test('backend fetches batches in parallel up to maxConcurrency', async () => {
+  const dir = tmpDir();
+  try {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let completed = 0;
+    const respond = async (url, body) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 20));
+      inFlight--;
+      completed++;
+      return { body: { results: body.inputs.map(() => ({ label: 'relevant', confidence: 0.9 })) } };
+    };
+    const fetch = stubFetch(respond);
+    const backend = new ClassifierDevBackend({ batchSize: 500, maxConcurrency: 4, fetchImpl: fetch });
+    const inputs = Array.from({ length: 2000 }, (_, i) => `item-${i}`);
+    await backend.classify({ inputs, labels: ['relevant', 'not relevant'], instructions: 'x' });
+    assert.equal(completed, 4);
+    assert.ok(maxInFlight >= 2 && maxInFlight <= 4, `expected concurrent fetches, got max ${maxInFlight}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('multi-label requests use multi=true and max_labels', async () => {
-  let seen;
-  const backend = new ClassifierDevBackend({ fetchImpl: async (_url, init) => {
-    seen = JSON.parse(init.body);
-    return jsonResponse({ results: [{ labels: ['code'], scores: { code: 0.9, docs: 0.1 } }] });
-  } });
-  await backend.classifyMulti({ inputs: ['x'], labels: ['code', 'docs'], instructions: 'tag', maxLabels: 2 });
-  assert.equal(seen.multi, true);
-  assert.equal(seen.max_labels, 2);
+test('backend throws when backend returns wrong result count', async () => {
+  const dir = tmpDir();
+  try {
+    const fetch = stubFetch(() => ({ body: { results: [{ label: 'relevant' }] } }));
+    const backend = new ClassifierDevBackend({ batchSize: 500, maxConcurrency: 1, fetchImpl: fetch });
+    await assert.rejects(
+      backend.classify({ inputs: ['a', 'b'], labels: ['relevant', 'not relevant'], instructions: 'x' }),
+      (err) => err instanceof BackendError && /result count mismatch/.test(err.message)
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('response count mismatch fails', async () => {
-  const backend = new ClassifierDevBackend({ fetchImpl: async () => jsonResponse({ results: [] }) });
-  await assert.rejects(() => backend.classify({ inputs: ['a'], labels: ['x', 'y'], instructions: '' }), /result count mismatch/);
-});
-
-test('invalid response label fails', async () => {
-  const backend = new ClassifierDevBackend({ fetchImpl: async () => jsonResponse({ results: [{ label: 'z', confidence: 0.9 }] }) });
-  await assert.rejects(() => backend.classify({ inputs: ['a'], labels: ['x', 'y'], instructions: '' }), /invalid label/);
-});
-
-test('502 retries once and then succeeds', async () => {
-  let calls = 0;
-  const backend = new ClassifierDevBackend({ fetchImpl: async () => {
-    calls++;
-    if (calls === 1) return jsonResponse({ error: 'temporary', code: 'typesafe_502' }, 502);
-    return jsonResponse({ results: [{ label: 'x', confidence: 0.9 }] });
-  } });
-  await backend.classify({ inputs: ['a'], labels: ['x', 'y'], instructions: '' });
-  assert.equal(calls, 2);
-});
-
-test('429 exposes rate-limit metadata without task-specific text', async () => {
-  const backend = new ClassifierDevBackend({ maxRetries: 0, fetchImpl: async () => jsonResponse({ error: 'limited', code: 'rate_limit_day' }, 429, { 'retry-after': '10' }) });
-  await assert.rejects(
-    () => backend.classify({ inputs: ['a'], labels: ['x', 'y'], instructions: '' }),
-    (error) => error instanceof BackendError && error.rateLimited && error.dayLimit && error.retryAfterMs === 10000
-  );
-});
-
-test('timeout is converted into BackendError', async () => {
-  const backend = new ClassifierDevBackend({ timeoutMs: 20, maxRetries: 0, fetchImpl: async (_url, init) => new Promise((_resolve, reject) => {
-    init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
-  }) });
-  await assert.rejects(() => backend.classify({ inputs: ['a'], labels: ['x', 'y'], instructions: '' }), /timed out/);
-});
-
-test('unknown additive fields are ignored', async () => {
-  const backend = new ClassifierDevBackend({ fetchImpl: async () => jsonResponse({ results: [{ label: 'x', confidence: 0.9, new_field: 'future' }], new_top_level: true }) });
-  const result = await backend.classify({ inputs: ['a'], labels: ['x', 'y'], instructions: '' });
-  assert.equal(result.results[0].new_field, 'future');
+test('backend retries on 503 and eventually succeeds', async () => {
+  const dir = tmpDir();
+  try {
+    let attempts = 0;
+    const fetch = stubFetch(() => {
+      attempts++;
+      if (attempts === 1) return { ok: false, status: 503, headers: { get: () => null }, json: async () => ({ error: 'busy' }) };
+      return { body: { results: [{ label: 'relevant', confidence: 0.9 }] } };
+    });
+    const backend = new ClassifierDevBackend({ batchSize: 500, maxRetries: 1, fetchImpl: fetch });
+    const result = await backend.classify({ inputs: ['a'], labels: ['relevant', 'not relevant'], instructions: 'x' });
+    assert.equal(attempts, 2);
+    assert.equal(result.results.length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

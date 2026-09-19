@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -52,9 +52,63 @@ export class Cache {
     if (!this.enabled) return;
     const path = this.pathFor(key);
     await mkdir(dirname(path), { recursive: true });
-    const body = JSON.stringify({ created_at: new Date(this.now()).toISOString(), api_version: 'v1', results: value.results });
+    const payload = { created_at: new Date(this.now()).toISOString(), api_version: 'v1', results: value.results };
+    if (value.inspect) payload.inspect = value.inspect;
+    if (value.clipped) payload.clipped = value.clipped;
+    const body = JSON.stringify(payload);
     const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(tmp, body, { encoding: 'utf8', mode: 0o600 });
     try { await rename(tmp, path); } catch (error) { if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error; await rm(path, { force: true }); await rename(tmp, path); }
+  }
+  async gc() {
+    if (!this.enabled) return { scanned: 0, removed: 0 };
+    const cacheDir = join(this.dir, 'cache');
+    if (!existsSync(cacheDir)) return { scanned: 0, removed: 0 };
+    const names = await readdir(cacheDir);
+    let scanned = 0, removed = 0;
+    for (const name of names) {
+      const path = join(cacheDir, name);
+      if (!name.endsWith('.json')) continue;
+      scanned++;
+      try {
+        const parsed = JSON.parse(await readFile(path, 'utf8'));
+        const created = Date.parse(parsed.created_at);
+        if (Number.isFinite(created) && this.now() - created > this.ttlMs) {
+          await rm(path, { force: true });
+          removed++;
+        }
+      } catch {
+        await rm(path, { force: true });
+        removed++;
+      }
+    }
+    return { scanned, removed };
+  }
+  async clear() {
+    const cacheDir = join(this.dir, 'cache');
+    if (!existsSync(cacheDir)) return { removed: 0 };
+    const names = (await readdir(cacheDir)).filter((n) => n.endsWith('.json'));
+    for (const name of names) await rm(join(cacheDir, name), { force: true });
+    return { removed: names.length };
+  }
+  async stats() {
+    const cacheDir = join(this.dir, 'cache');
+    if (!existsSync(cacheDir)) return { files: 0, bytes: 0, oldest_ms: null, newest_ms: null };
+    const names = await readdir(cacheDir);
+    let bytes = 0, oldest = Infinity, newest = 0;
+    for (const n of names) {
+      try {
+        const s = await stat(join(cacheDir, n));
+        bytes += s.size;
+        if (s.mtimeMs < oldest) oldest = s.mtimeMs;
+        if (s.mtimeMs > newest) newest = s.mtimeMs;
+      } catch {}
+    }
+    return {
+      files: names.length,
+      bytes,
+      oldest_ms: oldest === Infinity ? null : Math.round(oldest),
+      newest_ms: newest === 0 ? null : Math.round(newest)
+    };
   }
 }
