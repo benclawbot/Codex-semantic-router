@@ -34,7 +34,7 @@ jobs:
           echo "831038e6585c6c2ceae64f8d0d71cba0a0f327da00ed8c8f7d76dacedb6aff3d  /tmp/payload.tgz" | sha256sum -c -
 
           tar -xzf /tmp/payload.tgz
-          rm -rf .bootstrap .github/workflows/bootstrap.yml
+          rm -rf .bootstrap .github/workflows/bootstrap.yml .github/workflows/ci.yml
 
       - name: Run test suite
         run: npm test
