@@ -9,7 +9,7 @@
     "codex-semantic-router": "./skills/bulk-semantic-filter/scripts/router.mjs"
   },
   "scripts": {
-    "test": "node --test tests/*.test.mjs",
+    "test": "node --test",
     "test:network": "ALLOW_CLASSIFIER_NETWORK_TESTS=1 node --test tests/network.test.mjs"
   },
   "license": "MIT"
