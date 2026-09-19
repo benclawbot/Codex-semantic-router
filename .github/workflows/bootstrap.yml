@@ -1,10 +1,9 @@
 name: Bootstrap validated implementation
 
 on:
-  push:
+  pull_request:
     branches: [main]
-    paths:
-      - ".github/workflows/bootstrap.yml"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,6 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.head_ref }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
@@ -39,7 +39,7 @@ jobs:
       - name: Run test suite
         run: npm test
 
-      - name: Commit implementation
+      - name: Commit implementation to bootstrap branch
         shell: bash
         run: |
           set -euo pipefail
@@ -47,4 +47,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit -m "feat: implement Codex semantic router"
-          git push origin HEAD:main
+          git push origin HEAD:${{ github.head_ref }}
